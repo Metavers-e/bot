@@ -4,13 +4,12 @@
 import logging
 import requests
 import re
-import os
-import json
-import time
+import io
 from urllib.parse import urlparse, urljoin, quote
-from telegram import Update, ReplyKeyboardMarkup
+from telegram import Update
 from telegram.ext import Application, CommandHandler, MessageHandler, filters, ConversationHandler, ContextTypes
 
+# --- تنظیمات لاگ ---
 logging.basicConfig(format='%(asctime)s - %(name)s - %(levelname)s - %(message)s', level=logging.INFO)
 logger = logging.getLogger(__name__)
 
@@ -22,6 +21,7 @@ menu_keyboard = [
     ['🔍 Detect Web Server & WAF'],
     ['🧨 Test OWASP Vulnerabilities']
 ]
+reply_markup = [[button] for row in menu_keyboard for button in row]  # تبدیل به لیست درست
 reply_markup = ReplyKeyboardMarkup(menu_keyboard, resize_keyboard=True, one_time_keyboard=False)
 
 # --- WAF Signatures ---
@@ -121,24 +121,26 @@ async def run_test(update: Update, context: ContextTypes.DEFAULT_TYPE):
     session.headers.update({"User-Agent": "Mozilla/5.0 (X11; Linux x86_64) SecurityBot"})
     session.verify = False
 
+    result = f"🎯 Target: {url}\n"
+    result += "="*50 + "\n"
+
     try:
         r = session.get(url, timeout=10)
+        result += f"Status: {r.status_code}\n"
         headers = dict(r.headers)
         header_text = " ".join(f"{k}:{v}" for k, v in headers.items()).lower()
         body = r.text.lower()
     except Exception as e:
-        await update.message.reply_text(f"❌ Failed to connect: {str(e)}")
+        result += f"❌ Failed to connect: {str(e)}"
+        await update.message.reply_text(result)
         await update.message.reply_text("Choose an option:", reply_markup=reply_markup)
         return START_OVER
-
-    report = {"target": url, "findings": []}
-    result = f"🎯 Target: {url}\n\n"
 
     # --- تشخیص وب سرور و WAF ---
     if test_type == "🔍 Detect Web Server & WAF":
         # Web Server
         server_header = headers.get("Server", "Not found")
-        result += f"🖥️ Server Header: {server_header}\n"
+        result += f"\n🖥️ Server Header: {server_header}\n"
         server_name = "Unknown"
         server_version = "Unknown"
 
@@ -152,7 +154,7 @@ async def run_test(update: Update, context: ContextTypes.DEFAULT_TYPE):
             if server_name != "Unknown":
                 break
 
-        result += f"✅ Server: {server_name} v{server_version}\n\n"
+        result += f"✅ Server: {server_name} v{server_version}\n"
 
         # WAF
         waf_name = "None"
@@ -161,10 +163,11 @@ async def run_test(update: Update, context: ContextTypes.DEFAULT_TYPE):
             if any(sig in header_text or sig in body for sig in sigs):
                 waf_name = waf
                 if "cf-ray" in header_text:
-                    waf_version = headers.get("cf-ray", "").split('-')[1] if '-' in headers.get("cf-ray", "") else "Detected"
+                    ray = headers.get("cf-ray", "")
+                    waf_version = ray.split('-')[1] if '-' in ray else "Detected"
                 break
 
-        result += f"🛡️ WAF: {waf_name} v{waf_version}"
+        result += f"\n🛡️ WAF: {waf_name} v{waf_version}"
 
     # --- تست آسیب‌پذیری OWASP ---
     elif test_type == "🧨 Test OWASP Vulnerabilities":
@@ -174,7 +177,7 @@ async def run_test(update: Update, context: ContextTypes.DEFAULT_TYPE):
         base = url.split('=')[0] + '=' if '=' in url else url + '?test='
         found = []
 
-        result += f"🔧 Testing {len(payloads)} payloads on param: {param}\n\n"
+        result += f"\n🔧 Testing {len(payloads)} payloads on param: {param}\n\n"
 
         for payload in payloads:
             try:
@@ -183,27 +186,27 @@ async def run_test(update: Update, context: ContextTypes.DEFAULT_TYPE):
 
                 # SQLi
                 if "'" in payload and any(k in r_test.text.lower() for k in ["sql", "syntax", "mysql"]):
-                    found.append(f"SQLi: {payload[:30]}...")
+                    found.append(f"SQLi: {payload}")
 
                 # XSS
                 elif "<script>" in payload and payload in r_test.text:
-                    found.append(f"XSS: {payload[:30]}...")
+                    found.append(f"XSS: {payload}")
 
                 # LFI
                 elif "etc/passwd" in payload and "root:x" in r_test.text:
-                    found.append(f"LFI: {payload[:30]}...")
+                    found.append(f"LFI: {payload}")
 
                 # Command Injection
                 elif ";" in payload and "bin/bash" in r_test.text:
-                    found.append(f"RCE: {payload[:30]}...")
+                    found.append(f"RCE: {payload}")
 
-            except:
+            except Exception as e:
                 continue
 
         if found:
+            result += "⚠️ Matches found:\n"
             for item in found:
-                result += f"⚠️ {item}\n"
-            report["findings"].extend(found)
+                result += f"  → {item}\n"
         else:
             result += "✅ No vulnerabilities detected."
 
@@ -212,49 +215,43 @@ async def run_test(update: Update, context: ContextTypes.DEFAULT_TYPE):
             redir_url = url.replace("url=", "url=https://google.com")
             try:
                 r_redir = session.get(redir_url, allow_redirects=False, timeout=10)
-                if r_redir.status_code in [301, 302] and "google.com" in r_redir.headers.get("Location", ""):
-                    result += "\n🚨 Open Redirect: CONFIRMED!\n"
-                    report["findings"].append("Open Redirect detected")
+                location = r_redir.headers.get("Location", "")
+                if r_redir.status_code in [301, 302] and "google.com" in location:
+                    result += f"\n🚨 Open Redirect: CONFIRMED! → {location}"
             except:
                 pass
 
         # Security Headers
-        sec_headers = {
-            "Strict-Transport-Security": "HSTS missing",
-            "Content-Security-Policy": "CSP missing",
-            "X-Frame-Options": "Clickjacking vulnerable"
-        }
-        missing = [k for k in sec_headers if k not in headers]
+        sec_headers = ["Strict-Transport-Security", "Content-Security-Policy", "X-Frame-Options"]
+        missing = [h for h in sec_headers if h not in headers]
         if missing:
-            result += "\n⚠️ Missing Security Headers:\n" + "\n".join(missing)
-            report["findings"].extend([f"Missing: {h}" for h in missing])
+            result += f"\n\n⚠️ Missing Security Headers:\n"
+            for h in missing:
+                result += f"  → {h}\n"
 
-    # --- ارسال نتیجه و گزارش ---
+    # --- ارسال نتیجه به صورت متن + فایل TXT ---
     await update.message.reply_text(result)
 
-    # ذخیره گزارش
-    # ذخیره گزارش به صورت TXT
-    txt_file = f"results_{update.effective_user.id}.txt"
-    with open(txt_file, "w", encoding="utf-8") as f:
-        f.write(result)  # همان خروجی که به کاربر نشون داده میشد
+    # ارسال فایل TXT (در حافظه)
+    txt_buffer = io.BytesIO()
+    txt_buffer.write(result.encode("utf-8"))
+    txt_buffer.seek(0)
+    txt_buffer.name = f"results_{update.effective_user.id}.txt"
 
-# ارسال فایل TXT
     await update.message.reply_document(
-        document=open(txt_file, "rb"),
-        caption="📄 Full test results in TXT"
-)
-
-# پاک کردن فایل موقت
-    os.remove(txt_file)
+        document=txt_buffer,
+        filename=txt_buffer.name,
+        caption="📄 Full test results"
+    )
 
     await update.message.reply_text("Choose another test:", reply_markup=reply_markup)
     return START_OVER
 
 # --- اصلی ---
 def main():
-    TOKEN = "8263277491:AAExcpTTrKzHCguB-UYBRHHGun-VKqbkPBI"  # ←← توکن واقعی رو وارد کن
+    TOKEN = "8263277491:AAExcpTTrKzHCguB-UYBRHHGun-VKqbkPBI"  # ← توکن خودت رو وارد کن
 
-    app_bot = Application.builder().token(TOKEN).build()
+    app = Application.builder().token(TOKEN).build()
 
     conv_handler = ConversationHandler(
         entry_points=[CommandHandler("start", start), MessageHandler(filters.TEXT & ~filters.COMMAND, handle_choice)],
@@ -267,12 +264,11 @@ def main():
         per_user=True
     )
 
-    app_bot.add_handler(conv_handler)
-    app_bot.add_handler(CommandHandler("start", start))
+    app.add_handler(conv_handler)
+    app.add_handler(CommandHandler("start", start))
 
-    print("✅ Security Bot is running with keep_alive...")
-    app_bot.run_polling(drop_pending_updates=True)
+    print("✅ Security Bot is running...")
+    app.run_polling(drop_pending_updates=True)
 
-# --- اجرا ---
 if __name__ == "__main__":
     main()
