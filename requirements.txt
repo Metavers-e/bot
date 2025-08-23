@@ -1,6 +1,7 @@
-python-telegram-bot==20.9
+python-telegram-bot
 
 requests
 
 Flask
+
 
