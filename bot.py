@@ -1,22 +1,5 @@
 #!/usr/bin/env python3
 
-# --- Flask server for Replit (keep alive) ---
-from flask import Flask
-from threading import Thread
-
-app = Flask('')
-
-@app.route('/')
-def home():
-    return "🛡️ Security Testing Bot is online and ready!"
-
-def run():
-    app.run(host='0.0.0.0', port=8080)
-
-def keep_alive():
-    t = Thread(target=run)
-    t.start()
-
 # --- تنظیمات ---
 import logging
 import requests
@@ -250,12 +233,19 @@ async def run_test(update: Update, context: ContextTypes.DEFAULT_TYPE):
     await update.message.reply_text(result)
 
     # ذخیره گزارش
-    report_file = f"report_{update.effective_user.id}.json"
-    with open(report_file, "w") as f:
-        json.dump(report, f, indent=2)
+    # ذخیره گزارش به صورت TXT
+    txt_file = f"results_{update.effective_user.id}.txt"
+    with open(txt_file, "w", encoding="utf-8") as f:
+        f.write(result)  # همان خروجی که به کاربر نشون داده میشد
 
-    await update.message.reply_document(document=open(report_file, "rb"))
-    os.remove(report_file)
+# ارسال فایل TXT
+    await update.message.reply_document(
+        document=open(txt_file, "rb"),
+        caption="📄 Full test results in TXT"
+)
+
+# پاک کردن فایل موقت
+    os.remove(txt_file)
 
     await update.message.reply_text("Choose another test:", reply_markup=reply_markup)
     return START_OVER
@@ -285,5 +275,4 @@ def main():
 
 # --- اجرا ---
 if __name__ == "__main__":
-    keep_alive()
     main()
