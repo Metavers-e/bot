@@ -6,7 +6,7 @@ import requests
 import re
 import io
 from urllib.parse import urlparse, urljoin, quote
-from telegram import Update
+from telegram import Update, ReplyKeyboardMarkup
 from telegram.ext import Application, CommandHandler, MessageHandler, filters, ConversationHandler, ContextTypes
 
 # --- تنظیمات لاگ ---
@@ -272,3 +272,4 @@ def main():
 
 if __name__ == "__main__":
     main()
+
