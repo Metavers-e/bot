@@ -43,6 +43,9 @@ SERVER_SIGNATURES = {
 
 # --- /start ---
 async def start(update: Update, context: ContextTypes.DEFAULT_TYPE):
+    # پاک کردن داده‌های قبلی
+    context.user_data.clear()
+
     await update.message.reply_text(
         "🛡️ Security Testing Bot\n"
         "Choose an option:",
@@ -105,7 +108,7 @@ async def get_url(update: Update, context: ContextTypes.DEFAULT_TYPE):
 
     context.user_data['target_url'] = url
 
-    # اگر در حالت تست آسیب‌پذیری هستیم، فایل پیلود بخوایم
+    # فقط اگر در حالت تست آسیب‌پذیری باشیم، فایل پیلود بخوایم
     if context.user_data.get('mode') == 'vuln':
         await update.message.reply_text("📤 Send a .txt file with payloads (one per line)")
         return GET_PAYLOAD
@@ -170,26 +173,33 @@ async def run_scan(update: Update, context: ContextTypes.DEFAULT_TYPE):
     # تشخیص وب سرور
     server_header = headers.get("Server", "Not found")
     result += f"🖥️ Server Header: {server_header}\n"
+    server_name = "Unknown"
     for serv, patterns in SERVER_SIGNATURES.items():
         for pattern in patterns:
             match = re.search(pattern, server_header, re.IGNORECASE)
             if match:
                 version = match.group(1) or "Unknown"
                 result += f"   → {serv} v{version}\n"
+                server_name = serv
                 break
+        if server_name != "Unknown":
+            break
 
     # تشخیص WAF
     result += "\n🛡️ WAF:\n"
+    waf_name = "None"
     for waf, sigs in WAF_SIGNATURES.items():
         if any(sig in header_text or sig in body for sig in sigs):
             result += f"   → {waf}\n"
+            waf_name = waf
+            break
 
     await update.message.reply_text(result)
 
     # ارسال فایل TXT
     txt_buffer = io.BytesIO(result.encode("utf-8"))
-    txt_buffer.name = "scan.txt"
-    await update.message.reply_document(document=txt_buffer, filename="scan.txt")
+    txt_buffer.name = f"scan_{update.effective_user.id}.txt"
+    await update.message.reply_document(document=txt_buffer, filename=txt_buffer.name, caption="📄 WAF & Server Report")
 
     await update.message.reply_text("Choose another test:", reply_markup=reply_markup)
     return CHOOSING
@@ -204,7 +214,16 @@ async def run_vulnerability_test(update: Update, context: ContextTypes.DEFAULT_T
     session.verify = False
 
     vuln_names = {1: "SQLi", 2: "XSS", 3: "LFI", 4: "RCE"}
-    result = f"🧨 TESTING: {vuln_names[vuln_id]}\nURL: {url}\n\nFound:\n"
+    vuln_name = vuln_names[vuln_id]
+
+    result = ""
+    result += "🧨 VULNERABILITY TEST\n"
+    result += "=" * 60 + "\n"
+    result += f"Target: {url}\n"
+    result += f"Test: {vuln_name}\n"
+    result += f"Payloads: {len(payloads)}\n"
+    result += f"Timestamp: {datetime.now().strftime('%Y-%m-%d %H:%M:%S')}\n"
+    result += "-" * 60 + "\n"
 
     found = []
     base = url.split('=')[0] + '=' if '=' in url else url + '?test='
@@ -215,7 +234,7 @@ async def run_vulnerability_test(update: Update, context: ContextTypes.DEFAULT_T
             r = session.get(test_url, timeout=10)
             text = r.text.lower()
 
-            if vuln_id == 1 and "'" in payload and any(k in text for k in ["sql", "syntax"]):
+            if vuln_id == 1 and "'" in payload and any(k in text for k in ["sql", "syntax", "mysql"]):
                 found.append(f"SQLi: {payload}")
             elif vuln_id == 2 and "<script>" in payload and payload in r.text:
                 found.append(f"XSS: {payload}")
@@ -224,27 +243,30 @@ async def run_vulnerability_test(update: Update, context: ContextTypes.DEFAULT_T
             elif vuln_id == 4 and (";" in payload or "|" in payload) and "bin/bash" in r.text:
                 found.append(f"RCE: {payload}")
 
-        except:
+        except Exception as e:
             continue
 
     if found:
+        result += "✅ Vulnerabilities found:\n"
         for item in found:
-            result += f"✅ {item}\n"
+            result += f"  → {item}\n"
     else:
-        result += "❌ No match found.\n"
+        result += "❌ No vulnerabilities detected.\n"
 
     await update.message.reply_text(result)
 
+    # ارسال فایل TXT
     txt_buffer = io.BytesIO(result.encode("utf-8"))
-    txt_buffer.name = "test.txt"
-    await update.message.reply_document(document=txt_buffer, filename="test.txt")
+    txt_buffer.name = f"test_{update.effective_user.id}.txt"
+    await update.message.reply_document(document=txt_buffer, filename=txt_buffer.name, caption="📄 Test Results")
 
     await update.message.reply_text("Choose another test:", reply_markup=reply_markup)
     return CHOOSING
 
 # --- اصلی ---
 def main():
-    TOKEN = "8263277491:AAExcpTTrKzHCguB-UYBRHHGun-VKqbkPBI"  # ← توکن خودت رو وارد کن
+    TOKEN = "8263277491:AAExcpTTrKzHCguB-UYBRHHGun-VKqbkPBI"  # ← توکن واقعی خودت رو وارد کن
+
     app = Application.builder().token(TOKEN).build()
 
     conv_handler = ConversationHandler(
@@ -260,6 +282,8 @@ def main():
     )
 
     app.add_handler(conv_handler)
+    app.add_handler(CommandHandler("start", start))
+
     print("✅ Security Bot is running...")
     app.run_polling(drop_pending_updates=True)
 
