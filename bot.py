@@ -7,14 +7,14 @@ import io
 from datetime import datetime
 from urllib.parse import urlparse, quote
 from telegram import Update, ReplyKeyboardMarkup
-from telegram.ext import Application, CommandHandler, MessageHandler, filters, ContextTypes, ConversationHandler
+from telegram.ext import Application, CommandHandler, MessageHandler, filters, ConversationHandler, ContextTypes
 
 # --- تنظیمات لاگ ---
 logging.basicConfig(format='%(asctime)s - %(name)s - %(levelname)s - %(message)s', level=logging.INFO)
 logger = logging.getLogger(__name__)
 
 # --- وضعیت‌ها ---
-CHOOSING, GET_URL, GET_PAYLOAD = range(3)
+CHOOSING, GET_VULN_ID, GET_URL, GET_PAYLOAD = range(4)
 
 # --- منو ---
 menu_keyboard = [
@@ -59,42 +59,41 @@ async def handle_choice(update: Update, context: ContextTypes.DEFAULT_TYPE):
         return GET_URL
 
     elif text == "🧨 Test Vulnerabilities":
+        context.user_data['mode'] = 'vuln'
         msg = (
             "Select vulnerability to test:\n"
             "1 → SQL Injection\n"
             "2 → XSS\n"
             "3 → LFI\n"
             "4 → Command Injection\n"
-            "Enter number:"
+            "Enter number (1-4):"
         )
-        context.user_data['mode'] = 'vuln'
         await update.message.reply_text(msg)
-        return GET_URL
+        return GET_VULN_ID
 
     else:
         await update.message.reply_text("Use the menu.")
         return CHOOSING
 
-# --- دریافت URL یا شماره ---
-async def get_url(update: Update, context: ContextTypes.DEFAULT_TYPE):
+# --- دریافت شماره آسیب‌پذیری ---
+async def get_vuln_id(update: Update, context: ContextTypes.DEFAULT_TYPE):
     text = update.message.text.strip()
+    try:
+        vuln_id = int(text)
+        if vuln_id not in [1, 2, 3, 4]:
+            await update.message.reply_text("❌ Invalid number. Choose 1-4.")
+            return GET_VULN_ID
+        context.user_data['vuln_id'] = vuln_id
+        await update.message.reply_text("Enter target URL (e.g., https://site.com/page?id=1):")
+        return GET_URL
+    except:
+        await update.message.reply_text("❌ Please enter a number (1-4).")
+        return GET_VULN_ID
 
-    # اگر داریم تست آسیب‌پذیری انجام می‌دیم
-    if context.user_data.get('mode') == 'vuln':
-        try:
-            vuln_id = int(text)
-            if vuln_id not in [1, 2, 3, 4]:
-                await update.message.reply_text("❌ Invalid number. Choose 1-4.")
-                return GET_URL
-            context.user_data['vuln_id'] = vuln_id
-            await update.message.reply_text("Enter target URL:")
-            return GET_URL
-        except:
-            await update.message.reply_text("❌ Please enter a number (1-4).")
-            return GET_URL
+# --- دریافت URL ---
+async def get_url(update: Update, context: ContextTypes.DEFAULT_TYPE):
+    url = update.message.text.strip()
 
-    # حالا URL وارد شده
-    url = text
     if not url.startswith("http"):
         await update.message.reply_text("❌ Invalid URL. Must start with http:// or https://")
         return GET_URL
@@ -106,9 +105,10 @@ async def get_url(update: Update, context: ContextTypes.DEFAULT_TYPE):
 
     context.user_data['target_url'] = url
 
+    # اگر در حالت تست آسیب‌پذیری هستیم، فایل پیلود بخوایم
     if context.user_data.get('mode') == 'vuln':
         await update.message.reply_text("📤 Send a .txt file with payloads (one per line)")
-        return GET_PAYLOAD  # ✅ فقط وضعیت رو عوض کن
+        return GET_PAYLOAD
     else:
         return await run_scan(update, context)
 
@@ -116,8 +116,12 @@ async def get_url(update: Update, context: ContextTypes.DEFAULT_TYPE):
 async def get_payload(update: Update, context: ContextTypes.DEFAULT_TYPE):
     document = update.message.document
 
-    if not document or not document.file_name.endswith(".txt"):
+    if not document or not document.file_name.lower().endswith(".txt"):
         await update.message.reply_text("❌ Please send a .txt file.")
+        return GET_PAYLOAD
+
+    if document.file_size > 1024 * 1024:  # محدودیت 1MB
+        await update.message.reply_text("❌ File too large. Max 1MB.")
         return GET_PAYLOAD
 
     try:
@@ -137,17 +141,23 @@ async def get_payload(update: Update, context: ContextTypes.DEFAULT_TYPE):
         await update.message.reply_text(f"❌ Failed to read file: {str(e)}")
         return GET_PAYLOAD
 
-# --- اسکن WAF و سرور ---
+# --- اسکن WAF و وب سرور ---
 async def run_scan(update: Update, context: ContextTypes.DEFAULT_TYPE):
     url = context.user_data['target_url']
     session = requests.Session()
     session.headers.update({"User-Agent": "Mozilla/5.0 (X11; Linux x86_64) SecurityBot"})
     session.verify = False
 
-    result = f"🔍 SCAN REPORT\n{'='*50}\nTarget: {url}\n\n"
+    result = ""
+    result += "🔍 SCAN REPORT\n"
+    result += "=" * 60 + "\n"
+    result += f"Target: {url}\n"
+    result += f"Timestamp: {datetime.now().strftime('%Y-%m-%d %H:%M:%S')}\n"
+    result += "-" * 60 + "\n"
 
     try:
         r = session.get(url, timeout=10)
+        result += f"Status: {r.status_code}\n\n"
         headers = dict(r.headers)
         header_text = " ".join(f"{k}:{v}" for k, v in headers.items()).lower()
         body = r.text.lower()
@@ -157,15 +167,15 @@ async def run_scan(update: Update, context: ContextTypes.DEFAULT_TYPE):
         await update.message.reply_text("Choose an option:", reply_markup=reply_markup)
         return CHOOSING
 
-    # تشخیص سرور
+    # تشخیص وب سرور
     server_header = headers.get("Server", "Not found")
-    result += f"🖥️ Server: {server_header}\n"
-
+    result += f"🖥️ Server Header: {server_header}\n"
     for serv, patterns in SERVER_SIGNATURES.items():
         for pattern in patterns:
-            if re.search(pattern, server_header, re.IGNORECASE):
-                version = re.search(pattern, server_header).group(1) or "Unknown"
-                result += f"   → Detected: {serv} v{version}\n"
+            match = re.search(pattern, server_header, re.IGNORECASE)
+            if match:
+                version = match.group(1) or "Unknown"
+                result += f"   → {serv} v{version}\n"
                 break
 
     # تشخیص WAF
@@ -234,22 +244,23 @@ async def run_vulnerability_test(update: Update, context: ContextTypes.DEFAULT_T
 
 # --- اصلی ---
 def main():
-    TOKEN = "8263277491:AAExcpTTrKzHCguB-UYBRHHGun-VKqbkPBI"
+    TOKEN = "8263277491:AAExcpTTrKzHCguB-UYBRHHGun-VKqbkPBI"  # ← توکن خودت رو وارد کن
     app = Application.builder().token(TOKEN).build()
 
     conv_handler = ConversationHandler(
         entry_points=[CommandHandler("start", start)],
         states={
             CHOOSING: [MessageHandler(filters.TEXT & ~filters.COMMAND, handle_choice)],
+            GET_VULN_ID: [MessageHandler(filters.TEXT & ~filters.COMMAND, get_vuln_id)],
             GET_URL: [MessageHandler(filters.TEXT & ~filters.COMMAND, get_url)],
-            GET_PAYLOAD: [MessageHandler(filters.Document.FileExtension("txt"), get_payload)]
+            GET_PAYLOAD: [MessageHandler(filters.Document.FileExtension("txt"), get_payload)],
         },
         fallbacks=[CommandHandler("start", start)],
         per_user=True
     )
 
     app.add_handler(conv_handler)
-    print("✅ Bot is running...")
+    print("✅ Security Bot is running...")
     app.run_polling(drop_pending_updates=True)
 
 if __name__ == "__main__":
