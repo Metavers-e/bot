@@ -144,7 +144,7 @@ async def get_payload(update: Update, context: ContextTypes.DEFAULT_TYPE):
         await update.message.reply_text(f"❌ Failed to read file: {str(e)}")
         return GET_PAYLOAD
 
-# --- اسکن WAF و وب سرور ---
+# --- اسکن WAF و وب سرور (با نمایش ورژن) ---
 async def run_scan(update: Update, context: ContextTypes.DEFAULT_TYPE):
     url = context.user_data['target_url']
     session = requests.Session()
@@ -170,36 +170,56 @@ async def run_scan(update: Update, context: ContextTypes.DEFAULT_TYPE):
         await update.message.reply_text("Choose an option:", reply_markup=reply_markup)
         return CHOOSING
 
-    # تشخیص وب سرور
+    # --- تشخیص وب سرور و ورژن ---
+    result += "🖥️ WEB SERVER DETECTION\n"
     server_header = headers.get("Server", "Not found")
-    result += f"🖥️ Server Header: {server_header}\n"
+    result += f"Header: {server_header}\n"
+
     server_name = "Unknown"
+    server_version = "Unknown"
     for serv, patterns in SERVER_SIGNATURES.items():
         for pattern in patterns:
             match = re.search(pattern, server_header, re.IGNORECASE)
             if match:
-                version = match.group(1) or "Unknown"
-                result += f"   → {serv} v{version}\n"
                 server_name = serv
+                server_version = match.group(1) or "Unknown"
                 break
         if server_name != "Unknown":
             break
 
-    # تشخیص WAF
-    result += "\n🛡️ WAF:\n"
+    result += f"Detected: {server_name} v{server_version}\n\n"
+
+    # --- تشخیص WAF و ورژن ---
+    result += "🛡️ WAF DETECTION\n"
     waf_name = "None"
+    waf_version = "Unknown"
+
     for waf, sigs in WAF_SIGNATURES.items():
         if any(sig in header_text or sig in body for sig in sigs):
-            result += f"   → {waf}\n"
             waf_name = waf
+
+            # استخراج ورژن برای Cloudflare
+            if waf == "Cloudflare" and "cf-ray" in headers:
+                ray = headers["cf-ray"]
+                waf_version = ray.split('-')[1] if '-' in ray else "Detected"
+            # برای WAFهای دیگه می‌تونی سیگنال دیگه اضافه کنی
+            else:
+                waf_version = "Unknown"
             break
 
+    result += f"Detected: {waf_name} v{waf_version}\n"
+
+    # --- ارسال نتیجه ---
     await update.message.reply_text(result)
 
-    # ارسال فایل TXT
+    # --- ارسال فایل TXT ---
     txt_buffer = io.BytesIO(result.encode("utf-8"))
     txt_buffer.name = f"scan_{update.effective_user.id}.txt"
-    await update.message.reply_document(document=txt_buffer, filename=txt_buffer.name, caption="📄 WAF & Server Report")
+    await update.message.reply_document(
+        document=txt_buffer,
+        filename=txt_buffer.name,
+        caption="📄 Full WAF & Server Scan Report"
+    )
 
     await update.message.reply_text("Choose another test:", reply_markup=reply_markup)
     return CHOOSING
@@ -255,10 +275,14 @@ async def run_vulnerability_test(update: Update, context: ContextTypes.DEFAULT_T
 
     await update.message.reply_text(result)
 
-    # ارسال فایل TXT
+    # --- ارسال فایل TXT ---
     txt_buffer = io.BytesIO(result.encode("utf-8"))
     txt_buffer.name = f"test_{update.effective_user.id}.txt"
-    await update.message.reply_document(document=txt_buffer, filename=txt_buffer.name, caption="📄 Test Results")
+    await update.message.reply_document(
+        document=txt_buffer,
+        filename=txt_buffer.name,
+        caption="📄 Full Test Results"
+    )
 
     await update.message.reply_text("Choose another test:", reply_markup=reply_markup)
     return CHOOSING
