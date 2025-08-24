@@ -108,7 +108,7 @@ async def get_url(update: Update, context: ContextTypes.DEFAULT_TYPE):
 
     if context.user_data.get('mode') == 'vuln':
         await update.message.reply_text("📤 Send a .txt file with payloads (one per line)")
-        return GET_PAYLOAD
+        return GET_PAYLOAD  # ✅ فقط وضعیت رو عوض کن
     else:
         return await run_scan(update, context)
 
@@ -254,4 +254,3 @@ def main():
 
 if __name__ == "__main__":
     main()
-
